@@ -47,7 +47,7 @@ jobs:
         run: docker build -t secure-app:latest .
 
       - name: Container vulnerability scan (Trivy)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@master
         with:
           image-ref: secure-app:latest
           format: table
