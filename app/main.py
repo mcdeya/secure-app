@@ -1,15 +1,24 @@
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
+from markupsafe import escape
+import os
 
 app = Flask(__name__)
 
-@app.route("/")
-def home():
-    return jsonify({"message": "Secure DevSecOps App Running"})
+@app.route('/health', methods=['GET'])
+def health_check():
+    """Health check endpoint for container orchestration probes."""
+    return jsonify({"status": "healthy"}), 200
 
-@app.route("/health")
-def health():
-    return jsonify({"status": "healthy"})
+@app.route('/hello', methods=['GET'])
+def hello():
+    """A simple greeting endpoint demonstrating input sanitization."""
+    name = request.args.get('name', 'World')
+    # Sanitize input to prevent injection attacks
+    safe_name = escape(name)
+    return jsonify({"message": f"Hello, {safe_name}!"}), 200
 
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+if __name__ == '__main__':
+    # Never run in debug mode in production. 
+    # Bind to 0.0.0.0 to work properly inside a Docker container.
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host='0.0.0.0', port=port, debug=False)  # nosec B104
