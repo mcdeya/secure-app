@@ -1,15 +1,23 @@
-FROM python:3.12-slim
+FROM python:3.11-alpine3.20
 
-WORKDIR /app
+RUN apk update && apk upgrade --no-cache
 
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
+RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+
+WORKDIR /usr/src/app
 
 COPY requirements.txt .
+
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel
+
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app/ app/
 
-EXPOSE 5000
+RUN chown -R appuser:appgroup /usr/src/app
+
+USER appuser
+
+EXPOSE 8080
 
 CMD ["python", "app/main.py"]
