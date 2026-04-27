@@ -7,6 +7,7 @@ on:
 
 env:
   IMAGE_NAME: secure-app
+  IMAGE_TAG: ${{ github.sha }}
 
 jobs:
 
@@ -72,9 +73,6 @@ jobs:
     needs: unit-tests
     runs-on: ubuntu-latest
 
-    outputs:
-      image_tag: ${{ github.sha }}
-
     steps:
       - uses: actions/checkout@v4
 
@@ -82,14 +80,17 @@ jobs:
         run: docker build -t secure-app:${{ github.sha }} .
 
       # -----------------------------
-      # SBOM GENERATION (CRITICAL ADDITION)
+      # FIXED SBOM GENERATION (NO BROKEN ACTION)
       # -----------------------------
-      - name: Generate SBOM (Syft)
-        uses: anchore/syft-action@v0.10.0
-        with:
-          image: secure-app:${{ github.sha }}
-          format: cyclonedx-json
-          output-file: sbom.json
+      - name: Install Syft (official CLI)
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh \
+          | sh -s -- -b /usr/local/bin v1.4.1
+
+      - name: Generate SBOM (CycloneDX)
+        run: |
+          syft docker:secure-app:${{ github.sha }} \
+            -o cyclonedx-json=sbom.json
 
       - name: Upload SBOM artifact
         uses: actions/upload-artifact@v4
@@ -111,7 +112,6 @@ jobs:
       - name: Build image for scanning
         run: docker build -t secure-app:${{ github.sha }} .
 
-      # STRICT MODE (FAIL ON CRITICAL)
       - name: Run Trivy scan (STRICT)
         uses: aquasecurity/trivy-action@master
         with:
