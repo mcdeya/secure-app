@@ -1,1 +1,15 @@
+rules:
+  - id: python-hardcoded-secret
+    patterns:
+      - pattern: $SECRET = "..."
+    message: Possible hardcoded secret detected
+    severity: ERROR
+    languages:
+      - python
 
+  - id: insecure-subprocess
+    pattern: subprocess.call(..., shell=True)
+    message: Avoid shell=True in subprocess
+    severity: WARNING
+    languages:
+      - python
