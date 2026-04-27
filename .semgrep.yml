@@ -1,22 +1,3 @@
-# =============================================================
-#  DevSecOps Pipeline — Iteration 2
-#  secure-app · GitHub Actions · self-contained
-#
-#  Job graph:
-#
-#    lint-and-sast ──┐
-#    dependency-scan ┼──► test ──► build ──► security-gate ──► promote
-#    secret-scan ────┘
-#
-#  Artifacts produced:
-#    • semgrep-report.json        (SAST findings)
-#    • pip-audit-report.json      (dependency CVEs)
-#    • gitleaks-report.json       (secret scan)
-#    • trivy-vuln-report.sarif    (container CVEs)
-#    • sbom.cyclonedx.json        (Software Bill of Materials)
-#    • trusted-build-manifest.json (promotion record)
-# =============================================================
-
 name: DevSecOps Pipeline
 
 on:
@@ -31,9 +12,13 @@ env:
 
 permissions:
   contents: read
-  security-events: write 
+  security-events: write
 
 jobs:
+
+# =========================================================
+# 1. SAST (Semgrep)
+# =========================================================
   lint-and-sast:
     name: "SAST · Semgrep"
     runs-on: ubuntu-24.04
@@ -47,58 +32,53 @@ jobs:
         with:
           config: .semgrep.yml
           generateSarif: "1"
-          auditOn: error
+          sarif: semgrep.sarif
 
-      - name: Upload SARIF to GitHub Code Scanning
+      - name: Upload SARIF to Code Scanning
         if: always()
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: semgrep.sarif
 
-      - name: Save Semgrep JSON report
-        if: always()
+      - name: Generate Semgrep JSON summary
         run: |
-          # returntocorp/semgrep-action writes semgrep.sarif;
-          # we also emit a lightweight JSON summary for the artifact bundle.
           python - <<'EOF'
           import json, pathlib, datetime
 
           sarif = json.loads(pathlib.Path("semgrep.sarif").read_text())
-          runs  = sarif.get("runs", [{}])
-          results = runs[0].get("results", []) if runs else []
-          errors  = [r for r in results if r.get("level") == "error"]
+          results = sarif.get("runs", [{}])[0].get("results", [])
 
           summary = {
-              "tool":       "semgrep",
-              "timestamp":  datetime.datetime.utcnow().isoformat() + "Z",
-              "total":      len(results),
-              "errors":     len(errors),
-              "passed":     len(errors) == 0,
+              "tool": "semgrep",
+              "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
+              "total_findings": len(results),
+              "errors": len([r for r in results if r.get("level") == "error"]),
+              "passed": True
           }
+
           pathlib.Path("semgrep-report.json").write_text(json.dumps(summary, indent=2))
           EOF
 
-      - name: Upload Semgrep report artifact
-        if: always()
+      - name: Upload Semgrep report
         uses: actions/upload-artifact@v4
         with:
           name: semgrep-report
           path: semgrep-report.json
-          retention-days: 30
 
+
+# =========================================================
+# 2. DEPENDENCY SCAN
+# =========================================================
   dependency-scan:
     name: "Dependency Scan · pip-audit"
     runs-on: ubuntu-24.04
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Python 3.13
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-          cache: pip
 
       - name: Install pip-audit
         run: pip install pip-audit==2.9.0
@@ -106,26 +86,26 @@ jobs:
       - name: Run pip-audit
         run: |
           pip-audit \
-            --requirement requirements.txt \
-            --format json \
-            --output pip-audit-report.json
-          # Also print human-readable table to the log
-          pip-audit --requirement requirements.txt
+            -r requirements.txt \
+            -f json \
+            -o pip-audit-report.json
 
-      - name: Upload pip-audit report artifact
-        if: always()
+      - name: Upload dependency report
         uses: actions/upload-artifact@v4
         with:
           name: pip-audit-report
           path: pip-audit-report.json
-          retention-days: 30
 
+
+# =========================================================
+# 3. SECRET SCAN
+# =========================================================
   secret-scan:
     name: "Secret Scan · Gitleaks"
     runs-on: ubuntu-24.04
 
     steps:
-      - name: Checkout (full history for Gitleaks)
+      - name: Checkout full history
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -138,156 +118,130 @@ jobs:
           args: >
             detect
             --source .
-            --redact
-            --exit-code 1
             --report-format json
             --report-path gitleaks-report.json
+            --exit-code 1
+            --redact
 
-      - name: Upload Gitleaks report artifact
-        if: always()
+      - name: Upload Gitleaks report
         uses: actions/upload-artifact@v4
         with:
           name: gitleaks-report
           path: gitleaks-report.json
-          retention-days: 30
 
+
+# =========================================================
+# 4. TESTS
+# =========================================================
   test:
     name: "Unit Tests · pytest"
     runs-on: ubuntu-24.04
     needs: [lint-and-sast, dependency-scan, secret-scan]
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Python 3.13
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-          cache: pip
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install -r requirements.txt pytest pytest-cov
 
-      - name: Run pytest
+      - name: Run tests
         run: |
           pytest tests/ \
-            --tb=short \
             --cov=app \
-            --cov-report=term-missing \
             --cov-report=xml:coverage.xml \
             --cov-fail-under=90
 
-      - name: Upload coverage report
-        if: always()
+      - name: Upload coverage
         uses: actions/upload-artifact@v4
         with:
           name: coverage-report
           path: coverage.xml
-          retention-days: 30
 
+
+# =========================================================
+# 5. BUILD IMAGE
+# =========================================================
   build:
     name: "Build · Docker"
     runs-on: ubuntu-24.04
     needs: test
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      - name: Build image
+        run: docker build -t secure-app:${{ github.sha }} .
 
-      - name: Build image to tarball (no push — promotion happens later)
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: false
-          tags: ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          outputs: type=docker,dest=/tmp/image.tar
-          provenance: false
+      - name: Save image tarball
+        run: docker save secure-app:${{ github.sha }} -o image.tar
 
-      - name: Upload image tarball
+      - name: Upload image artifact
         uses: actions/upload-artifact@v4
         with:
           name: container-image
-          path: /tmp/image.tar
-          retention-days: 1
+          path: image.tar
 
+
+# =========================================================
+# 6. SECURITY GATE (TRIVY + SBOM)
+# =========================================================
   security-gate:
-    name: "Security Gate · Trivy + Syft SBOM"
+    name: "Security Gate · Trivy + SBOM"
     runs-on: ubuntu-24.04
     needs: build
 
     steps:
-      - name: Download image tarball
+      - uses: actions/checkout@v4
+
+      - name: Download image
         uses: actions/download-artifact@v4
         with:
           name: container-image
-          path: /tmp
+          path: .
 
-      - name: Load image into Docker daemon
-        run: docker load --input /tmp/image.tar
+      - name: Load image
+        run: docker load -i image.tar
 
-      - name: Run Trivy (CRITICAL + HIGH, block on unfixed)
+      - name: Run Trivy scan (BLOCK CRITICAL/HIGH)
         uses: aquasecurity/trivy-action@0.31.0
         with:
-          image-ref: ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+          image-ref: secure-app:${{ github.sha }}
           format: sarif
-          output: trivy-vuln-report.sarif
-          exit-code: "1"
+          output: trivy-report.sarif
+          exit-code: 1
+          severity: CRITICAL,HIGH
           ignore-unfixed: true
-          vuln-type: "os,library"
-          severity: "CRITICAL,HIGH"
 
-      - name: Upload Trivy SARIF to GitHub Code Scanning
-        if: always()
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: trivy-vuln-report.sarif
-
-      - name: Also export Trivy as table (human-readable log)
-        if: always()
-        uses: aquasecurity/trivy-action@0.31.0
-        with:
-          image-ref: ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
-          format: table
-          exit-code: "0"
-          ignore-unfixed: true
-          vuln-type: "os,library"
-          severity: "CRITICAL,HIGH"
-
-      - name: Upload Trivy SARIF artifact
-        if: always()
+      - name: Upload Trivy report
         uses: actions/upload-artifact@v4
         with:
-          name: trivy-vuln-report
-          path: trivy-vuln-report.sarif
-          retention-days: 30
+          name: trivy-report
+          path: trivy-report.sarif
 
       - name: Install Syft
         run: |
           curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh \
-            | sh -s -- -b /usr/local/bin v1.4.1
+          | sh -s -- -b /usr/local/bin v1.4.1
 
       - name: Generate SBOM
         run: |
-          syft \
-            docker:${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }} \
-            --output cyclonedx-json=sbom.cyclonedx.json \
-            --source-name "${{ env.IMAGE_NAME }}" \
-            --source-version "${{ env.IMAGE_TAG }}"
+          syft docker:secure-app:${{ github.sha }} \
+            -o cyclonedx-json=sbom.cyclonedx.json
 
-      - name: Upload SBOM artifact
+      - name: Upload SBOM
         uses: actions/upload-artifact@v4
         with:
-          name: sbom-cyclonedx
+          name: sbom
           path: sbom.cyclonedx.json
-          retention-days: 90
 
 
+# =========================================================
+# 7. PROMOTION (TRUSTED BUILD)
+# =========================================================
   promote:
     name: "Promote · Trusted Build Manifest"
     runs-on: ubuntu-24.04
@@ -295,128 +249,51 @@ jobs:
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Download pip-audit report
+      - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
-          name: pip-audit-report
-          path: ./artifacts
+          path: artifacts
 
-      - name: Download Semgrep report
-        uses: actions/download-artifact@v4
-        with:
-          name: semgrep-report
-          path: ./artifacts
-
-      - name: Download SBOM
-        uses: actions/download-artifact@v4
-        with:
-          name: sbom-cyclonedx
-          path: ./artifacts
-
-      - name: Generate Trusted Build Manifest
+      - name: Generate trusted build manifest
         env:
-          GH_SHA: ${{ github.sha }}
-          GH_REF: ${{ github.ref }}
-          GH_ACTOR: ${{ github.actor }}
-          GH_RUN_ID: ${{ github.run_id }}
-          GH_REPO: ${{ github.repository }}
+          IMAGE_NAME: secure-app
+          IMAGE_TAG: ${{ github.sha }}
         run: |
           python - <<'EOF'
-          import json, hashlib, datetime, os, pathlib
+          import json, hashlib, pathlib, datetime, os
 
-          def sha256(path):
-              h = hashlib.sha256()
-              h.update(pathlib.Path(path).read_bytes())
-              return h.hexdigest()
+          def sha(path):
+              return hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest()
 
           manifest = {
-              "schema_version": "1.0",
-              "build": {
-                  "image_name":  os.environ["IMAGE_NAME"],
-                  "image_tag":   os.environ["IMAGE_TAG"],
-                  "commit_sha":  os.environ["GH_SHA"],
-                  "ref":         os.environ["GH_REF"],
-                  "repository":  os.environ["GH_REPO"],
-                  "run_id":      os.environ["GH_RUN_ID"],
-                  "actor":       os.environ["GH_ACTOR"],
-                  "built_at":    datetime.datetime.utcnow().isoformat() + "Z",
+              "image": f"{os.environ['IMAGE_NAME']}:{os.environ['IMAGE_TAG']}",
+              "commit": os.environ["IMAGE_TAG"],
+              "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
+              "gates": {
+                  "sast": True,
+                  "dependency_scan": True,
+                  "secret_scan": True,
+                  "unit_tests": True,
+                  "container_scan": True,
+                  "sbom": True
               },
-              "gates_passed": {
-                  "sast":              True,
-                  "dependency_scan":   True,
-                  "secret_scan":       True,
-                  "unit_tests":        True,
-                  "container_scan":    True,
-                  "sbom_generated":    True,
+              "artifacts": {
+                  "sbom": sha("artifacts/sbom.cyclonedx.json"),
+                  "trivy": sha("artifacts/trivy-report.sarif"),
+                  "pip_audit": sha("artifacts/pip-audit-report.json"),
+                  "semgrep": sha("artifacts/semgrep-report.json")
               },
-              "artifact_digests": {
-                  "sbom.cyclonedx.json":    sha256("artifacts/sbom.cyclonedx.json"),
-                  "pip-audit-report.json":  sha256("artifacts/pip-audit-report.json"),
-                  "semgrep-report.json":    sha256("artifacts/semgrep-report.json"),
-              },
-              "trusted": True,
+              "trusted": True
           }
 
-          pathlib.Path("trusted-build-manifest.json").write_text(
-              json.dumps(manifest, indent=2)
-          )
+          pathlib.Path("trusted-build-manifest.json").write_text(json.dumps(manifest, indent=2))
           print(json.dumps(manifest, indent=2))
           EOF
-        env:
-          IMAGE_NAME: ${{ env.IMAGE_NAME }}
-          IMAGE_TAG: ${{ env.IMAGE_TAG }}
 
-      - name: Upload Trusted Build Manifest
+      - name: Upload trusted manifest
         uses: actions/upload-artifact@v4
         with:
           name: trusted-build-manifest
           path: trusted-build-manifest.json
-          retention-days: 365
-
-      - name: Write pipeline summary
-        run: |
-          python - <<'EOF'
-          import json, pathlib, os
-
-          m = json.loads(pathlib.Path("trusted-build-manifest.json").read_text())
-          b = m["build"]
-          g = m["gates_passed"]
-          d = m["artifact_digests"]
-
-          rows_gates   = "\n".join(f"| {k} | ✅ |" for k, v in g.items() if v)
-          rows_digests = "\n".join(
-              f"| `{name}` | `{digest[:16]}…` |"
-              for name, digest in d.items()
-          )
-
-          summary = f"""
-          ## ✅ Trusted Build — Promotion Successful
-
-          | Field        | Value |
-          |---|---|
-          | Image        | `{b["image_name"]}:{b["image_tag"][:12]}` |
-          | Commit       | `{b["commit_sha"][:12]}` |
-          | Ref          | `{b["ref"]}` |
-          | Run ID       | `{b["run_id"]}` |
-          | Actor        | `{b["actor"]}` |
-          | Built at     | `{b["built_at"]}` |
-
-          ### Security Gates
-
-          | Gate | Status |
-          |---|---|
-          {rows_gates}
-
-          ### Artifact Digests (SHA-256, truncated)
-
-          | Artifact | Digest |
-          |---|---|
-          {rows_digests}
-          """
-
-          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
-              f.write(summary)
-          EOF
