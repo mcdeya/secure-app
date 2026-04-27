@@ -5,10 +5,17 @@ on:
     branches: [main]
   pull_request:
 
+env:
+  IMAGE_NAME: secure-app
+
 jobs:
 
+# -----------------------------
+# 1. DEPENDENCY SCAN
+# -----------------------------
   dependency-scan:
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
 
@@ -21,10 +28,19 @@ jobs:
           python -m pip install --upgrade pip
           pip install pip-audit
 
-      - name: Run dependency scan
-        run: pip-audit -r requirements.txt
+      - name: Run dependency scan (JSON output)
+        run: pip-audit -r requirements.txt -f json -o pip-audit.json
+
+      - name: Upload dependency scan results
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependency-scan
+          path: pip-audit.json
 
 
+# -----------------------------
+# 2. UNIT TESTS
+# -----------------------------
   unit-tests:
     needs: dependency-scan
     runs-on: ubuntu-latest
@@ -42,18 +58,22 @@ jobs:
           pip install -r requirements.txt
           pip install pytest
 
-      # FIX: ensures "app/" can be imported in GitHub Actions
       - name: Set PYTHONPATH
         run: echo "PYTHONPATH=${GITHUB_WORKSPACE}" >> $GITHUB_ENV
 
-      # FIX: uses your folder name "test/"
       - name: Run unit tests
         run: pytest test/ -v
 
 
+# -----------------------------
+# 3. DOCKER BUILD + SBOM
+# -----------------------------
   docker-build:
     needs: unit-tests
     runs-on: ubuntu-latest
+
+    outputs:
+      image_tag: ${{ github.sha }}
 
     steps:
       - uses: actions/checkout@v4
@@ -61,7 +81,26 @@ jobs:
       - name: Build Docker image
         run: docker build -t secure-app:${{ github.sha }} .
 
+      # -----------------------------
+      # SBOM GENERATION (CRITICAL ADDITION)
+      # -----------------------------
+      - name: Generate SBOM (Syft)
+        uses: anchore/syft-action@v0.10.0
+        with:
+          image: secure-app:${{ github.sha }}
+          format: cyclonedx-json
+          output-file: sbom.json
 
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: sbom.json
+
+
+# -----------------------------
+# 4. CONTAINER SECURITY SCAN
+# -----------------------------
   container-scan:
     needs: docker-build
     runs-on: ubuntu-latest
@@ -70,20 +109,43 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Build image for scanning
-        run: docker build -t secure-app:latest .
+        run: docker build -t secure-app:${{ github.sha }} .
 
-      - name: Run Trivy vulnerability scanner
+      # STRICT MODE (FAIL ON CRITICAL)
+      - name: Run Trivy scan (STRICT)
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: secure-app:latest
-          format: table
-          exit-code: 0
-          severity: CRITICAL
+          image-ref: secure-app:${{ github.sha }}
+          format: json
+          output: trivy-report.json
+          exit-code: 1
+          severity: CRITICAL,HIGH
+
+      - name: Upload container scan results
+        uses: actions/upload-artifact@v4
+        with:
+          name: container-scan
+          path: trivy-report.json
 
 
+# -----------------------------
+# 5. TRUSTED DEPLOYMENT
+# -----------------------------
   deploy:
     needs: container-scan
     runs-on: ubuntu-latest
 
     steps:
-      - run: echo "Deployment successful to production 🚀"
+      - name: Define trusted build
+        run: |
+          echo "TRUSTED_BUILD=true" > trust.txt
+          echo "IMAGE=secure-app:${{ github.sha }}" >> trust.txt
+
+      - name: Upload trust artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: trusted-build
+          path: trust.txt
+
+      - name: Deploy application
+        run: echo "Deployment successful 🚀 (trusted build only)"
