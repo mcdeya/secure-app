@@ -1,7 +1,69 @@
-      - name: Semgrep SAST Scan
-        uses: returntocorp/semgrep-action@v1
-        with:
-          config: .semgrep.yml
-          generateSarif: false
-          json: true
-          json-output: semgrep-results.json
+# =============================================================
+#  Semgrep rule set — secure-app
+#  Scope: Python application code under app/
+#  Standard: OWASP Top-10 A02, A03, A05, A09
+# =============================================================
+
+rules:
+  # ── A02 · Cryptographic Failures ────────────────────────────
+  - id: no-hardcoded-secrets
+    patterns:
+      - pattern: $VAR = "..."
+      - metavariable-regex:
+          metavariable: $VAR
+          regex: (?i)(password|passwd|secret|api_key|token|private_key)
+    message: >
+      Possible hardcoded secret in variable '$VAR'.
+      Use environment variables or a secrets manager instead.
+    languages: [python]
+    severity: ERROR
+    metadata:
+      category: security
+      cwe: "CWE-798"
+      owasp: "A02:2021"
+
+  # ── A03 · Injection ─────────────────────────────────────────
+  - id: no-subprocess-shell-true
+    pattern: subprocess.run(..., shell=True, ...)
+    message: >
+      subprocess.run with shell=True enables shell injection.
+      Pass arguments as a list instead.
+    languages: [python]
+    severity: ERROR
+    metadata:
+      cwe: "CWE-78"
+      owasp: "A03:2021"
+
+  - id: no-eval
+    pattern: eval(...)
+    message: "eval() is unsafe — it executes arbitrary code."
+    languages: [python]
+    severity: ERROR
+    metadata:
+      cwe: "CWE-95"
+      owasp: "A03:2021"
+
+  # ── A05 · Security Misconfiguration ─────────────────────────
+  - id: flask-debug-must-be-false
+    patterns:
+      - pattern: app.run(..., debug=True, ...)
+    message: >
+      Flask debug mode must never be True in production —
+      it exposes an interactive debugger without authentication.
+    languages: [python]
+    severity: ERROR
+    metadata:
+      cwe: "CWE-94"
+      owasp: "A05:2021"
+
+  # ── A09 · Logging Failures ───────────────────────────────────
+  - id: no-print-in-app-code
+    pattern: print(...)
+    message: >
+      Use the standard logging module instead of print().
+      print() bypasses log-level control and structured output.
+    languages: [python]
+    severity: WARNING
+    metadata:
+      cwe: "CWE-778"
+      owasp: "A09:2021"
