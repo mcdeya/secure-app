@@ -1,6 +1,6 @@
 """
-Unit tests for the secure Flask microservice.
-All tests are self-contained and use Flask's built-in test client.
+Unit test for the secure Flask microservice.
+All test are self-contained and use Flask's built-in test client.
 """
 
 from __future__ import annotations
